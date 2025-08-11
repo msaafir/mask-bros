@@ -1,0 +1,426 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Mask Bro's</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <style>
+    html,body { height:100%; margin:0; background:#87ceeb; font-family: Arial, sans-serif; }
+    #game { width:100%; height:100vh; display:block; }
+    /* simple UI for touch controls */
+    .touch-controls {
+      position: absolute; left:0; right:0; bottom:8px; display:flex; justify-content:space-between; pointer-events:none;
+      padding: 0 6px;
+    }
+    .touch-left, .touch-right, .touch-jump {
+      width:78px; height:78px; background:rgba(0,0,0,0.25); border-radius:14px; display:flex;
+      align-items:center; justify-content:center; color:white; font-weight:bold; font-size:18px;
+      pointer-events:auto;
+      user-select:none;
+      -webkit-user-select:none;
+    }
+    .left-right { display:flex; gap:8px; }
+    .touch-jump { margin-left:auto; }
+    .footer {
+      position: absolute; left:8px; top:8px; color:#fff; text-shadow:0 1px 2px rgba(0,0,0,0.6);
+      background: rgba(0,0,0,0.25); padding:6px 10px; border-radius:8px; font-size:13px;
+    }
+  </style>
+  <!-- Phaser 3 from CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser.min.js"></script>
+</head>
+<body>
+  <div id="game"></div>
+
+  <div class="footer">Mask Bro's — collect stars ⭐ avoid spikes. Tap to start music. </div>
+
+  <div class="touch-controls" id="touchControls" style="display:none;">
+    <div class="left-right">
+      <div class="touch-left" id="leftBtn">◀</div>
+      <div class="touch-right" id="rightBtn">▶</div>
+    </div>
+    <div class="touch-jump" id="jumpBtn">⤴︎</div>
+  </div>
+
+<script>
+/*
+Mask Bro's
+A tiny, shareable HTML5 platformer using Phaser 3.
+Character: orange striped cat in a ski mask + headset (drawn procedurally so no copyrighted sprites).
+Includes a simple procedural up-tempo background loop (WebAudio).
+*/
+
+const WIDTH = Math.min(window.innerWidth, 1280);
+const HEIGHT = Math.min(window.innerHeight, 900);
+
+const config = {
+  type: Phaser.AUTO,
+  parent: 'game',
+  width: WIDTH,
+  height: HEIGHT,
+  backgroundColor: 0x87ceeb,
+  physics: {
+    default: 'arcade',
+    arcade: { gravity: { y: 1000 }, debug: false }
+  },
+  scale: {
+    mode: Phaser.Scale.FIT,
+    autoCenter: Phaser.Scale.CENTER_BOTH
+  },
+  scene: {
+    preload: preload,
+    create: create,
+    update: update
+  }
+};
+
+const game = new Phaser.Game(config);
+
+let player, cursors, platforms, stars, score = 0, scoreText, musicEngine, startedMusic=false;
+let leftHeld=false, rightHeld=false, jumpHeld=false, jumpCount=0;
+
+function preload() {
+  // We'll create textures dynamically in create()
+  this.load.image('ground', 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAOEAAABkCAYAAABb4KQmAAAAAklEQVR4AewaftIAAAJrSURBVO3BQY4cQAwEMw4f9G2l6lqS5e0Tg8f38sAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB4B6cAAQAAACQ0knwAAAAAElFTkSuQmCC');
+  // simple spike placeholder (we'll tint)
+  const spike = this.textures.createCanvas('spike', 40, 40);
+  const ctx = spike.getContext();
+  ctx.fillStyle = '#00000000'; ctx.fillRect(0,0,40,40);
+  ctx.fillStyle = '#333';
+  ctx.beginPath(); ctx.moveTo(2,38); ctx.lineTo(20,4); ctx.lineTo(38,38); ctx.closePath(); ctx.fill();
+  spike.refresh();
+}
+
+function create() {
+  const scene = this;
+
+  // create a ground tiles (simple rectangles)
+  platforms = this.physics.add.staticGroup();
+  // base ground
+  const groundHeight = 64;
+  for (let i = 0; i < 8; i++) {
+    const x = i * (WIDTH / 8) + (WIDTH/16);
+    const g = platforms.create(x, HEIGHT - groundHeight/2, 'ground').setScale((WIDTH/8)/32, groundHeight/32).refreshBody();
+    g.tint = 0x8B4513;
+  }
+
+  // a few floating platforms
+  const p1 = platforms.create(WIDTH*0.25, HEIGHT*0.6, 'ground').setScale(2.6, 0.6).refreshBody();
+  const p2 = platforms.create(WIDTH*0.55, HEIGHT*0.45, 'ground').setScale(1.6, 0.6).refreshBody();
+  const p3 = platforms.create(WIDTH*0.82, HEIGHT*0.33, 'ground').setScale(1.2, 0.6).refreshBody();
+  [p1,p2,p3].forEach(p => p.tint = 0x654321);
+
+  // draw our protagonist as a dynamic texture (orange striped cat, ski mask + headset)
+  makeCatTexture(this);
+
+  player = this.physics.add.sprite(100, HEIGHT - 200, 'cat');
+  player.setBounce(0.1);
+  player.setCollideWorldBounds(true);
+  player.body.setSize(42, 42);
+  player.body.setOffset(8, 6);
+
+  // stars collectible
+  stars = this.physics.add.group({ key: 'star', repeat: 6, setXY: { x: 160, y: 0, stepX: 140 }});
+  stars.children.iterate(function(child, i){
+    // draw simple star texture if absent
+    if (!scene.textures.exists('star')) {
+      const c = scene.textures.createCanvas('star', 24, 24);
+      const ctx = c.getContext();
+      ctx.fillStyle = '#FFD700';
+      ctx.beginPath();
+      ctx.moveTo(12,0); ctx.lineTo(15,9); ctx.lineTo(24,9); ctx.lineTo(17,14);
+      ctx.lineTo(19,24); ctx.lineTo(12,18); ctx.lineTo(5,24); ctx.lineTo(7,14);
+      ctx.lineTo(0,9); ctx.lineTo(9,9);
+      ctx.closePath(); ctx.fill();
+      c.refresh();
+    }
+    child.setBounceY(Phaser.Math.FloatBetween(0.2, 0.9));
+  });
+
+  // spikes (danger)
+  const spikes = this.physics.add.group();
+  const spike1 = spikes.create(WIDTH*0.45, HEIGHT - 80, 'spike').setScale(1).refreshBody();
+  const spike2 = spikes.create(WIDTH*0.7, HEIGHT - 80, 'spike').setScale(1).refreshBody();
+  [spike1, spike2].forEach(s => s.body.setSize(40,20).setOffset(0,20));
+
+  // collisions
+  this.physics.add.collider(player, platforms);
+  this.physics.add.collider(stars, platforms);
+  this.physics.add.collider(spikes, platforms);
+  this.physics.add.overlap(player, stars, collectStar, null, this);
+  this.physics.add.overlap(player, spikes, hitSpike, null, this);
+
+  // camera follow
+  this.cameras.main.setBounds(0, 0, WIDTH * 1.5, HEIGHT);
+  this.physics.world.setBounds(0, 0, WIDTH * 1.5, HEIGHT);
+  this.cameras.main.startFollow(player, true, 0.08, 0.08);
+
+  // score text
+  scoreText = this.add.text(16, 16, 'Score: 0', { fontSize: '18px', fill: '#fff' }).setScrollFactor(0);
+
+  // input
+  cursors = this.input.keyboard.createCursorKeys();
+  this.input.keyboard.addKeys('W,A,S,D');
+
+  // touch UI
+  if (this.sys.game.device.input.touch) {
+    document.getElementById('touchControls').style.display = 'flex';
+  }
+
+  // touch events
+  addTouchHandlers(scene);
+
+  // start simple procedural music when user taps screen (user gesture required)
+  this.input.once('pointerdown', () => {
+    if (!startedMusic) {
+      startedMusic = true;
+      musicEngine = new ProceduralMusic();
+      musicEngine.play();
+    }
+  });
+
+  // instructions
+  this.add.text(16, 44, 'Arrows / WASD to move. Tap jump to double jump.', { fontSize: '13px', fill: '#fff' }).setScrollFactor(0);
+
+  // little bounce animation
+  this.tweens.add({
+    targets: player,
+    duration: 1200,
+    y: player.y - 6,
+    yoyo: true,
+    repeat: -1,
+    ease: 'Sine.easeInOut',
+    paused: true // we'll keep player physics, so leave paused to not fight physics
+  });
+}
+
+function update() {
+  // simple movement
+  const speed = 260;
+  const scene = this;
+
+  // keyboard
+  const left = cursors.left.isDown || this.input.keyboard.keys[65].isDown || leftHeld;
+  const right = cursors.right.isDown || this.input.keyboard.keys[68].isDown || rightHeld;
+  const jumpKey = Phaser.Input.Keyboard.JustDown(cursors.up) || Phaser.Input.Keyboard.JustDown(this.input.keyboard.keys[87]);
+
+  if (left) {
+    player.setVelocityX(-speed);
+    player.flipX = true;
+  } else if (right) {
+    player.setVelocityX(speed);
+    player.flipX = false;
+  } else {
+    player.setVelocityX(0);
+  }
+
+  // jumping: allow up to 2 jumps (double jump)
+  if (jumpKey || jumpHeld) {
+    if (player.body.onFloor() || jumpCount < 1) {
+      player.setVelocityY(-460);
+      jumpCount += 1;
+      // small jump sound via webaudio
+      if (musicEngine) musicEngine.oneShotBeep(880, 0.02, 0.02);
+    }
+  }
+  if (player.body.onFloor()) {
+    jumpCount = 0;
+  }
+}
+
+function collectStar(player, star) {
+  star.disableBody(true, true);
+  score += 10;
+  scoreText.setText('Score: ' + score);
+  if (musicEngine) musicEngine.oneShotBeep(1200, 0.01, 0.05);
+}
+
+function hitSpike(player, spike) {
+  // reset position
+  this.cameras.main.shake(300, 0.01);
+  player.setTint(0xff0000);
+  player.setVelocity(0, -200);
+  if (musicEngine) musicEngine.oneShotBeep(220, 0.15, 0.2);
+  this.time.delayedCall(600, () => {
+    player.clearTint();
+    player.setPosition(100, config.height - 200);
+    player.setVelocity(0,0);
+    score = Math.max(0, score - 10);
+    scoreText.setText('Score: ' + score);
+  });
+}
+
+/* Procedural music engine - simple up-tempo cinematic loop */
+class ProceduralMusic {
+  constructor() {
+    this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+    this.tempo = 128; // bpm
+    this.isPlaying = false;
+    this.nextNoteTime = 0;
+    this.scheduleAheadTime = 0.1;
+    this.lookahead = 25.0;
+    this.intervalID = null;
+    this.startTime = this.ctx.currentTime;
+    this.pattern = [0, 2, 4, 7, 9, 7, 4, 2]; // simple scale degrees
+  }
+
+  play(){
+    if (this.isPlaying) return;
+    this.isPlaying = true;
+    this.nextNoteTime = this.ctx.currentTime;
+    this.intervalID = setInterval(()=>this.scheduler(), this.lookahead);
+  }
+
+  stop(){
+    this.isPlaying = false;
+    clearInterval(this.intervalID);
+  }
+
+  scheduler() {
+    while (this.nextNoteTime < this.ctx.currentTime + this.scheduleAheadTime) {
+      this.scheduleNote(this.nextNoteTime);
+      const secondsPerBeat = 60.0 / this.tempo;
+      this.nextNoteTime += 0.5 * secondsPerBeat; // half-beats
+    }
+  }
+
+  scheduleNote(time) {
+    const beatIndex = Math.floor((time - this.startTime) * (this.tempo/60) * 2) % this.pattern.length;
+    const degree = this.pattern[beatIndex];
+    // big cinematic pad
+    const pad = this.ctx.createOscillator();
+    pad.type = 'sine';
+    pad.frequency.value = 110 * Math.pow(2, degree/12);
+    const padGain = this.ctx.createGain();
+    padGain.gain.setValueAtTime(0.0001, time);
+    padGain.gain.exponentialRampToValueAtTime(0.08, time + 0.02);
+    padGain.gain.exponentialRampToValueAtTime(0.0001, time + 0.45);
+    pad.connect(padGain).connect(this.ctx.destination);
+    pad.start(time);
+    pad.stop(time + 0.5);
+
+    // small rhythmic click
+    if (beatIndex % 2 === 0) {
+      const clickOsc = this.ctx.createOscillator();
+      clickOsc.type = 'square';
+      clickOsc.frequency.value = 1200;
+      const g = this.ctx.createGain();
+      g.gain.setValueAtTime(0.02, time);
+      g.gain.exponentialRampToValueAtTime(0.0001, time + 0.06);
+      clickOsc.connect(g).connect(this.ctx.destination);
+      clickOsc.start(time);
+      clickOsc.stop(time + 0.06);
+    }
+
+    // bass thump on first of pattern
+    if (beatIndex === 0) {
+      const bass = this.ctx.createOscillator();
+      bass.type = 'sawtooth';
+      bass.frequency.value = 55 * Math.pow(2, degree/12);
+      const bg = this.ctx.createGain();
+      bg.gain.setValueAtTime(0.2, time);
+      bg.gain.exponentialRampToValueAtTime(0.0001, time + 0.2);
+      bass.connect(bg).connect(this.ctx.destination);
+      bass.start(time);
+      bass.stop(time + 0.2);
+    }
+  }
+
+  // one-shot sound effects
+  oneShotBeep(freq=880, duration=0.05, release=0.03) {
+    const o = this.ctx.createOscillator();
+    o.type = 'triangle'; o.frequency.value = freq;
+    const g = this.ctx.createGain(); g.gain.setValueAtTime(0.0001, this.ctx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.08, this.ctx.currentTime + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, this.ctx.currentTime + duration + release);
+    o.connect(g).connect(this.ctx.destination);
+    o.start(this.ctx.currentTime);
+    o.stop(this.ctx.currentTime + duration + release + 0.02);
+  }
+}
+
+/* Draws a cat as a texture using Phaser Graphics (procedural art)
+   - orange body, darker stripes, black ski mask opening for eyes, headset on top
+*/
+function makeCatTexture(scene) {
+  const g = scene.add.graphics();
+  const w = 64, h = 64;
+  g.clear();
+
+  // body / face (circle)
+  g.fillStyle(0xFFA500, 1);
+  g.fillEllipse(w/2, h/2, 46, 48);
+
+  // stripes
+  g.fillStyle(0xCC7A00, 1);
+  for (let i=0;i<3;i++){
+    g.fillRect(14 + i*10, 20 - i*3, 6, 22);
+  }
+
+  // ski mask (dark cloth with eyehole)
+  g.fillStyle(0x222222, 1);
+  g.fillEllipse(w/2, h/2 - 6, 50, 28);
+  // eye holes (rounded rectangle)
+  g.fillStyle(0xFFFFFF, 1);
+  g.fillRect(w/2 - 18, h/2 - 12, 16, 12);
+  g.fillRect(w/2 + 2, h/2 - 12, 16, 12);
+  g.fillStyle(0x000000, 1);
+  g.fillRect(w/2 - 14, h/2 - 9, 10, 8);
+  g.fillRect(w/2 + 6, h/2 - 9, 10, 8);
+
+  // headset (band across head + ear cups)
+  g.lineStyle(4, 0x333333, 1);
+  g.beginPath();
+  g.moveTo(12, h/2 - 14);
+  g.quadraticCurveTo(w/2, h/2 - 30, w-12, h/2 - 14);
+  g.strokePath();
+
+  // mic boom (left)
+  g.lineStyle(3, 0x222222, 1);
+  g.beginPath();
+  g.moveTo(w-12, h/2 - 6);
+  g.quadraticCurveTo(w-28, h/2 - 2, w-34, h/2 + 6);
+  g.strokePath();
+
+  // earcup circles
+  g.fillStyle(0x1E1E1E, 1);
+  g.fillCircle(12, h/2 - 4, 10);
+  g.fillCircle(w-12, h/2 - 4, 10);
+
+  // small mouth
+  g.fillStyle(0x000000, 1);
+  g.fillRect(w/2 - 4, h/2 + 10, 8, 2);
+
+  // finalize texture
+  g.generateTexture('cat', w, h);
+  g.destroy(); // remove graphics
+}
+
+/* Touch handlers connect DOM buttons to in-game booleans */
+function addTouchHandlers(scene) {
+  const leftBtn = document.getElementById('leftBtn');
+  const rightBtn = document.getElementById('rightBtn');
+  const jumpBtn = document.getElementById('jumpBtn');
+
+  ['touchstart','mousedown'].forEach(ev => {
+    leftBtn.addEventListener(ev, e => { e.preventDefault(); leftHeld = true; }, {passive:false});
+    rightBtn.addEventListener(ev, e => { e.preventDefault(); rightHeld = true; }, {passive:false});
+    jumpBtn.addEventListener(ev, e => { e.preventDefault(); jumpHeld = true; }, {passive:false});
+  });
+  ['touchend','mouseup','touchcancel','mouseleave'].forEach(ev => {
+    leftBtn.addEventListener(ev, e => { leftHeld = false; }, {passive:true});
+    rightBtn.addEventListener(ev, e => { rightHeld = false; }, {passive:true});
+    jumpBtn.addEventListener(ev, e => { jumpHeld = false; }, {passive:true});
+  });
+}
+
+// resize handling for responsiveness
+window.addEventListener('resize', () => {
+  const w = Math.min(window.innerWidth, 1280);
+  const h = Math.min(window.innerHeight, 900);
+  game.scale.resize(w, h);
+});
+</script>
+
+</body>
+</html>
